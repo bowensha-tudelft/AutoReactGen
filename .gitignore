@@ -1,2 +1,2 @@
-*.pre
-*.post
+__pycache__/
+box.top:Zone.Identifier

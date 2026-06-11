@@ -1,4 +1,15 @@
 ; Created by Sobtop (http://sobereva.com/soft/sobtop) Version 1.0(dev5) on 2026-06-03
+
+[ atomtypes ]
+; name   at.num      mass       charge   ptype     sigma (nm)    epsilon (kJ/mol)
+c3             6  12.010736  0.00000000  A      3.399670E-01    4.577296E-01
+hc             1   1.007941  0.00000000  A      2.649533E-01    6.568880E-02
+ca             6  12.010736  0.00000000  A      3.399670E-01    3.598240E-01
+ha             1   1.007941  0.00000000  A      2.599642E-01    6.276000E-02
+ne             7  14.006703  0.00000000  A      3.249999E-01    7.112800E-01
+c1             6  12.010736  0.00000000  A      3.399670E-01    8.786400E-01
+o              8  15.999405  0.00000000  A      2.959922E-01    8.786400E-01
+
 [ moleculetype ]
 ; name          nrexcl
 MDI       3

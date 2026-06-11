@@ -1,4 +1,14 @@
 ; Q4MC-CD parameters copied from Mate Erdos
+
+[ atomtypes ]
+; name   at.num      mass       charge   ptype     sigma (nm)    epsilon (kJ/mol)
+CG             6  12.010000  0.00000000  A     0.33996695      0.4577296
+H2             1   1.008000  0.00000000  A     0.22931733      0.0656888
+OS             8  16.000000  0.00000000  A     0.30000123        0.71128
+H1             1   1.008000  0.00000000  A      0.2471353      0.0656888
+OH             8  16.000000  0.00000000  A     0.30664734      0.8803136
+HO             1   1.008000  0.00000000  A              0              0
+
 [ moleculetype ]
 ; Name            nrexcl
 BCD          3

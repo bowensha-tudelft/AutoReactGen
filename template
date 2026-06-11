@@ -1,0 +1,41 @@
+# Comments: Title or something else
+
+n atoms
+n bonds
+n angles
+n dihedrals
+n impropers
+
+Coords
+
+[index x y z]
+
+Types
+
+[index type]
+
+Charges
+
+[index charge]
+
+Molecules
+
+[index mol_index]
+
+Bonds
+
+[bond_index bond_type index_atom1 index_atom2]
+
+Angles
+
+[angle_index angle_type index_atom1 index_atom2 index_atom3]
+
+Dihedrals
+
+[dihedral_index dihedral_type index_atom1 index_atom2 index_atom3 index_atom4]
+
+Impropers
+
+[improper_index improper_type index_atom1 index_atom2 index_atom3 index_atom4]
+
+
