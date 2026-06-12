@@ -1,0 +1,23 @@
+# Comments for title or something.
+
+n edgeIDs
+n equivalences
+n deletedIDs
+
+InitiatorIDs
+
+[Index] # Only 2 lines.
+
+EdgeIDS
+
+[Index]
+
+Equivalences
+
+[Index_before Index_after]
+
+DeleteIDs
+
+[Index] # Leave as blank here.
+
+

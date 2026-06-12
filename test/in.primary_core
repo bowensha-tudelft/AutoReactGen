@@ -1,0 +1,91 @@
+# ─────────────────────────────────────────────────────────────
+# BCD-MDI primary-core reaction smoke test
+# Reaction: BCD-OH + O=C=N-MDI -> urethane
+#
+# Run from inside reaction_templates_primary_core/:
+#   lmp -in in.primary_core
+# ─────────────────────────────────────────────────────────────
+
+units           real
+atom_style      full
+newton          on
+
+boundary        p p p
+dimension       3
+
+# ── Force field: preserve BCD-MDI system terms ────────────────
+bond_style      hybrid harmonic
+angle_style     hybrid harmonic
+dihedral_style  hybrid multi/harmonic charmm
+special_bonds   lj 0.0 0.0 0.5 coul 0.0 0.0 0.8333
+
+pair_style      lj/cut/coul/dsf 0.25 9.0 9.0
+pair_modify     tail yes mix arithmetic
+
+read_data       primary_core.data                         &
+  extra/bond/per/atom      5                         &
+  extra/angle/per/atom     15                        &
+  extra/dihedral/per/atom  20                        &
+  extra/special/per/atom   30
+
+# Pair coefficients
+pair_coeff      1  1   0.1094000   3.3996695   # CG
+pair_coeff      2  2   0.0157000   2.2931733   # H2
+pair_coeff      3  3   0.1700000   3.0000123   # OS
+pair_coeff      4  4   0.0157000   2.4713530   # H1
+pair_coeff      5  5   0.2104000   3.0664734   # OH
+pair_coeff      6  6   0.0000000   0.0000000   # HO
+pair_coeff      7  7   0.1094000   3.3996700   # c3
+pair_coeff      8  8   0.0157000   2.6495330   # hc
+pair_coeff      9  9   0.0860000   3.3996700   # ca
+pair_coeff      10 10   0.0150000   2.5996420   # ha
+pair_coeff      11 11   0.1700000   3.2499990   # ne
+pair_coeff      12 12   0.2100000   3.3996700   # c1
+pair_coeff      13 13   0.2100000   2.9599220   # o
+pair_coeff      14 14   0.0157000   1.0690780   # hn
+pair_coeff      15 15   0.1700000   3.2499990   # n
+pair_coeff      16 16   0.0860000   3.3996700   # c
+
+# ── Reaction templates ────────────────────────────────────────
+molecule        pre_bcd_mdi       ../BCD-MDI.pre
+molecule        post_bcd_mdi      ../BCD-MDI.post
+
+# ── Initial velocities ────────────────────────────────────────
+velocity        all create 300.0 4928459 dist gaussian
+
+# ── Reactive atom groups ──────────────────────────────────────
+group           reactive type 5 11 12 13
+
+# ── Crosslink reaction ───────────────────────────────────────
+fix             xlink all bond/react stabilization yes statted_grp .03 &
+		                  react crosslink reactive 1 0.0 4.0 pre_bcd_mdi post_bcd_mdi ../BCD-MDI.map
+
+# Nylon example style: stabilize reacting atoms and thermostat them
+# separately. Keep BCD-MDI groups / type IDs, but adopt the same protocol.
+group           temp type 3 5 11 12 13 14 15 16
+group           others subtract all temp
+fix             nvt_main others nvt temp 300.0 300.0 100.0
+fix             react_tstat temp temp/rescale 1 300.0 300.0 10.0 1.0
+fix             temp_int temp nve/limit 0.1
+
+# Optional stabilization group used by bond/react (scaled-down smoke test).
+# The nylon example thermostats its internally created reacting group.
+
+# ── Output ────────────────────────────────────────────────────
+thermo          100
+thermo_style    custom step temp press density f_xlink[*]
+thermo_modify   colname auto
+
+compute         molcluster all fragment/atom
+
+dump            traj all custom 100 primary_core.lammpstrj id mol type element q x y z c_molcluster
+dump_modify     traj element C H O H O H C H C H N C O H N C
+
+restart         1000 primary_core.restart1 primary_core.restart2
+
+# ── Run ───────────────────────────────────────────────────────
+timestep        0.25
+run             40000
+
+write_data      primary_core_final.data nofix
+write_restart   primary_core_final.restart

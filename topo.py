@@ -203,11 +203,49 @@ def write_template(fpath, atoms, idmap, types_lu, charges_lu, coords_lu,
         f.write("\n")
 
 
-def gen_templates(mols, atom_list, individual, offsets, within_set, args):
-    """Generate pre and post LAMMPS molecule template files."""
+def write_map(fpath, title, initiator_ids, edge_ids, equivalences, delete_ids=()):
+    """Write a LAMMPS fix bond/react map file."""
+    with open(fpath, 'w') as f:
+        f.write(f"{title}\n\n")
+        f.write(f"{len(edge_ids):>6} edgeIDs\n")
+        f.write(f"{len(equivalences):>6} equivalences\n")
+        f.write(f"{len(delete_ids):>6} deleteIDs\n")
+
+        f.write("\nInitiatorIDs\n\n")
+        for tid in initiator_ids:
+            f.write(f"{tid:>6}\n")
+
+        f.write("\nEdgeIDs\n\n")
+        for tid in edge_ids:
+            f.write(f"{tid:>6}\n")
+
+        f.write("\nEquivalences\n\n")
+        for pre_id, post_id in equivalences:
+            f.write(f"{pre_id:>6} {post_id:>6}\n")
+
+        f.write("\nDeleteIDs\n\n")
+        for tid in delete_ids:
+            f.write(f"{tid:>6}\n")
+
+        f.write("\n")
+
+
+def gen_templates(mols, atom_list, individual, offsets, within_set, starts, cdist, args):
+    """Generate pre/post LAMMPS molecule template files and reaction map."""
     # --- gather data ---
     atoms = sorted(within_set)
     idmap = {cid: i for i, cid in enumerate(atoms, 1)}  # combined -> template
+
+    if len(starts) != 2:
+        print("Error: .map generation currently requires exactly two initiator atoms")
+        return
+
+    initiator_ids = [idmap[cid] for cid in starts]
+    selected_dist = {cid: d for cid, d in cdist.items() if cid in within_set}
+    edge_depth = max(selected_dist.values()) if selected_dist else 0
+    edge_ids = sorted(idmap[cid] for cid, d in selected_dist.items() if d == edge_depth)
+    equivalences = [(i, i) for i in range(1, len(atoms) + 1)]
+    delete_ids = []
 
     # Pre: types, charges, topology from individual ITPs
     pre_types, pre_charges, pre_coords, pre_mol = {}, {}, {}, {}
@@ -250,6 +288,7 @@ def gen_templates(mols, atom_list, individual, offsets, within_set, args):
     # --- write ---
     pre_title = f"Pre-reaction template: {'+'.join(mols)} atoms {'+'.join(map(str,atom_list))} within={args.within}"
     post_title = f"Post-reaction template: {combined_name} atoms {'+'.join(map(str,atom_list))} within={args.within}"
+    map_title = f"Reaction map: {combined_name} atoms {'+'.join(map(str,atom_list))} within={args.within}"
 
     write_template(f"{combined_name}.pre", atoms, idmap,
                    pre_types, pre_charges, pre_coords, pre_mol,
@@ -259,8 +298,12 @@ def gen_templates(mols, atom_list, individual, offsets, within_set, args):
                    ctypes, ccharges, post_coords, post_mol,
                    cbonds, cangles, cpropers, cimpropers, post_title)
 
+    write_map(f"{combined_name}.map", map_title,
+              initiator_ids, edge_ids, equivalences, delete_ids)
+
     print(f"Generated {combined_name}.pre ({len(atoms)} atoms)")
     print(f"Generated {combined_name}.post ({len(atoms)} atoms)")
+    print(f"Generated {combined_name}.map ({len(equivalences)} equivalences, {len(edge_ids)} edgeIDs)")
 
 
 # ── main ─────────────────────────────────────────────────────────
@@ -347,7 +390,7 @@ def main():
     show(atom_list[0], cbonds, cangles, cpropers, cimpropers, args, final_set)
 
     # Generate LAMMPS templates
-    gen_templates(mols, atom_list, individual, offsets, final_set, args)
+    gen_templates(mols, atom_list, individual, offsets, final_set, starts, cdist, args)
 
 
 if __name__ == '__main__':
