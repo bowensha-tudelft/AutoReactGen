@@ -4,7 +4,7 @@ Pre-reaction template: BCD+MDI atoms 146+28 within=4
     21 bonds
     31 angles
     35 dihedrals
-     3 impropers
+     0 impropers
 
 Coords
 
@@ -207,8 +207,3 @@ Dihedrals
     35 ha-ca-ca-ne                20     17     18     21
 
 Impropers
-
-     1 ca-ca-ca-ha                14     18     16     19
-     2 ca-ca-ca-ha                15     18     17     20
-     3 ca-ca-ca-ne                16     17     18     21
-

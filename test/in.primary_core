@@ -85,7 +85,7 @@ restart         1000 primary_core.restart1 primary_core.restart2
 
 # ── Run ───────────────────────────────────────────────────────
 timestep        0.25
-run             40000
+run             400
 
 write_data      primary_core_final.data nofix
 write_restart   primary_core_final.restart
