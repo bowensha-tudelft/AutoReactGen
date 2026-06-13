@@ -4,43 +4,283 @@ Also generates LAMMPS reaction molecule templates (pre/post)."""
 
 import argparse
 from collections import deque
+from dataclasses import dataclass, field
 from pathlib import Path
+
+
+@dataclass(frozen=True)
+class AtomType:
+    name: str
+    atomic_number: int | None
+    mass: float
+    charge: float
+    ptype: str
+    sigma: float
+    epsilon: float
+    comment: str = ''
+
+
+@dataclass(frozen=True)
+class Atom:
+    id: int
+    type: str
+    residue: int
+    resname: str
+    name: str
+    cgnr: int
+    charge: float
+    mass: float | None = None
+    comment: str = ''
+
+
+@dataclass(frozen=True)
+class Bond:
+    ai: int
+    aj: int
+    funct: str
+    params: tuple[float, ...] = field(default_factory=tuple)
+    comment: str = ''
+
+    @property
+    def atoms(self):
+        return (self.ai, self.aj)
+
+
+@dataclass(frozen=True)
+class Angle:
+    ai: int
+    aj: int
+    ak: int
+    funct: str
+    params: tuple[float, ...] = field(default_factory=tuple)
+    comment: str = ''
+
+    @property
+    def atoms(self):
+        return (self.ai, self.aj, self.ak)
+
+
+@dataclass(frozen=True)
+class Dihedral:
+    ai: int
+    aj: int
+    ak: int
+    al: int
+    funct: str
+    params: tuple[float, ...] = field(default_factory=tuple)
+    improper: bool = False
+    comment: str = ''
+
+    @property
+    def atoms(self):
+        return (self.ai, self.aj, self.ak, self.al)
+
+
+@dataclass
+class ItpTopology:
+    filepath: Path
+    atomtypes: dict[str, AtomType] = field(default_factory=dict)
+    atoms: dict[int, Atom] = field(default_factory=dict)
+    bonds: list[Bond] = field(default_factory=list)
+    angles: list[Angle] = field(default_factory=list)
+    propers: list[Dihedral] = field(default_factory=list)
+    impropers: list[Dihedral] = field(default_factory=list)
+    moleculetype: str | None = None
+    nrexcl: int | None = None
+
+    @property
+    def natoms(self):
+        return len(self.atoms)
+
+
+@dataclass
+class TopologyFile:
+    filepath: Path
+    defaults: dict[str, str] = field(default_factory=dict)
+    atomtypes: dict[str, AtomType] = field(default_factory=dict)
+    includes: list[Path] = field(default_factory=list)
+    system: str | None = None
+    molecules: list[tuple[str, int]] = field(default_factory=list)
+
+
+def _split_data_comment(raw):
+    data, sep, comment = raw.partition(';')
+    return data.strip(), comment.strip() if sep else ''
+
+
+def _float_tokens(tokens):
+    vals = []
+    for tok in tokens:
+        try:
+            vals.append(float(tok))
+        except ValueError:
+            break
+    return tuple(vals)
+
+
+def _int_or_none(tok):
+    try:
+        return int(tok)
+    except ValueError:
+        return None
+
+
+def parse_itp_rich(filepath):
+    """Parse a GROMACS ITP file and preserve force-field parameters.
+
+    The older parse_itp() wrapper below intentionally keeps its compact return
+    shape for the existing template/BFS code. New data/in writers should use
+    this richer object so no parameter columns or duplicate dihedral terms are
+    lost before TypeRegistry assignment.
+    """
+    topo = ItpTopology(Path(filepath))
+    section = None
+    section_improper = False
+
+    with open(filepath) as f:
+        for raw in f:
+            data, comment = _split_data_comment(raw)
+            if not data:
+                continue
+            if data.startswith('['):
+                section = data.strip('[]').strip().split()[0].lower()
+                section_improper = 'improper' in raw.lower()
+                continue
+            if data.startswith('#'):
+                continue
+
+            tok = data.split()
+            _parse_common_topology_line(topo, section, section_improper, tok, comment)
+
+    return topo
+
+
+def parse_top(filepath):
+    """Parse a GROMACS .top file system layer.
+
+    This captures the parts needed for box-driven assembly: defaults,
+    atomtypes, includes, system name, and [molecules] counts. Included ITP files
+    are recorded but not recursively expanded here.
+    """
+    top = TopologyFile(Path(filepath))
+    section = None
+
+    with open(filepath) as f:
+        for raw in f:
+            data, comment = _split_data_comment(raw)
+            if not data:
+                continue
+            if data.startswith('#include'):
+                inc = data.split(maxsplit=1)[1].strip().strip('"<>')
+                top.includes.append(Path(inc))
+                continue
+            if data.startswith('#'):
+                continue
+            if data.startswith('['):
+                section = data.strip('[]').strip().split()[0].lower()
+                continue
+
+            tok = data.split()
+            if section == 'defaults' and len(tok) >= 5:
+                top.defaults = {
+                    'nbfunc': tok[0],
+                    'comb-rule': tok[1],
+                    'gen-pairs': tok[2],
+                    'fudgeLJ': tok[3],
+                    'fudgeQQ': tok[4],
+                }
+            elif section == 'atomtypes' and len(tok) >= 7:
+                name = tok[0]
+                top.atomtypes[name] = AtomType(
+                    name=name,
+                    atomic_number=_int_or_none(tok[1]),
+                    mass=float(tok[2]),
+                    charge=float(tok[3]),
+                    ptype=tok[4],
+                    sigma=float(tok[5]),
+                    epsilon=float(tok[6]),
+                    comment=comment,
+                )
+            elif section == 'system' and top.system is None:
+                top.system = data
+            elif section == 'molecules' and len(tok) >= 2:
+                top.molecules.append((tok[0], int(tok[1])))
+
+    return top
+
+
+def _parse_common_topology_line(topo, section, section_improper, tok, comment):
+    if section == 'atomtypes' and len(tok) >= 7:
+        name = tok[0]
+        topo.atomtypes[name] = AtomType(
+            name=name,
+            atomic_number=_int_or_none(tok[1]),
+            mass=float(tok[2]),
+            charge=float(tok[3]),
+            ptype=tok[4],
+            sigma=float(tok[5]),
+            epsilon=float(tok[6]),
+            comment=comment,
+        )
+    elif section == 'moleculetype' and len(tok) >= 2:
+        topo.moleculetype = tok[0]
+        topo.nrexcl = int(tok[1])
+    elif section == 'atoms' and len(tok) >= 7:
+        aid = int(tok[0])
+        topo.atoms[aid] = Atom(
+            id=aid,
+            type=tok[1],
+            residue=int(tok[2]),
+            resname=tok[3],
+            name=tok[4],
+            cgnr=int(tok[5]),
+            charge=float(tok[6]),
+            mass=float(tok[7]) if len(tok) > 7 else None,
+            comment=comment,
+        )
+    elif section == 'bonds' and len(tok) >= 3:
+        topo.bonds.append(Bond(
+            ai=int(tok[0]),
+            aj=int(tok[1]),
+            funct=tok[2],
+            params=_float_tokens(tok[3:]),
+            comment=comment,
+        ))
+    elif section == 'angles' and len(tok) >= 4:
+        topo.angles.append(Angle(
+            ai=int(tok[0]),
+            aj=int(tok[1]),
+            ak=int(tok[2]),
+            funct=tok[3],
+            params=_float_tokens(tok[4:]),
+            comment=comment,
+        ))
+    elif section == 'dihedrals' and len(tok) >= 5:
+        funct = tok[4]
+        improper = section_improper or funct == '4'
+        d = Dihedral(
+            ai=int(tok[0]),
+            aj=int(tok[1]),
+            ak=int(tok[2]),
+            al=int(tok[3]),
+            funct=funct,
+            params=_float_tokens(tok[5:]),
+            improper=improper,
+            comment=comment,
+        )
+        (topo.impropers if improper else topo.propers).append(d)
 
 
 def parse_itp(filepath):
     """Return (natoms, bonds, angles, propers, impropers, types, charges)."""
-    natoms = 0
-    bonds, angles = set(), set()
-    propers, impropers = set(), set()
-    types, charges = {}, {}
-    section = None
-    improper = False
-
-    with open(filepath) as f:
-        for raw in f:
-            line = raw.split(';')[0].strip()
-            if not line:
-                continue
-            if line.startswith('['):
-                section = line.strip('[]').strip().split()[0]
-                improper = 'improper' in raw.lower()
-                continue
-
-            tok = line.split()
-            if section == 'atoms':
-                aid = int(tok[0])
-                types[aid] = tok[1]
-                charges[aid] = float(tok[6])
-                natoms += 1
-            elif section == 'bonds':
-                bonds.add((int(tok[0]), int(tok[1])))
-            elif section == 'angles':
-                angles.add((int(tok[0]), int(tok[1]), int(tok[2])))
-            elif section == 'dihedrals':
-                d = (int(tok[0]), int(tok[1]), int(tok[2]), int(tok[3]))
-                (impropers if improper else propers).add(d)
-
-    return natoms, bonds, angles, propers, impropers, types, charges
+    topo = parse_itp_rich(filepath)
+    bonds = {b.atoms for b in topo.bonds}
+    angles = {a.atoms for a in topo.angles}
+    propers = {d.atoms for d in topo.propers}
+    impropers = {d.atoms for d in topo.impropers}
+    types = {aid: atom.type for aid, atom in topo.atoms.items()}
+    charges = {aid: atom.charge for aid, atom in topo.atoms.items()}
+    return topo.natoms, bonds, angles, propers, impropers, types, charges
 
 
 def parse_gro(filepath):
