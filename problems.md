@@ -1,152 +1,273 @@
-# AutoReactGen 当前问题记录
+# AutoReactGen 问题与方案
 
 ## 背景
 
-AutoReactGen 是一个自动化生成 LAMMPS `fix bond/react` 分子模板文件的工具，从 GROMACS 拓扑 (ITP) 和坐标 (GRO) 文件生成 `.pre`、`.post`、`.map` 模板文件。
+AutoReactGen 从 GROMACS ITP/GRO 文件生成 LAMMPS `fix bond/react` 的 `.pre/.post/.map` 模板。当前仅实现了 `topo.py`（~230行）完成模板生成，但完整的 LAMMPS 模拟还需要 **data 文件**（体系拓扑+坐标+参数）和配套的 **in 文件**。
 
-当前生成的 `BCD-MDI.pre/post/map` 已接入 `test/in.primary_core`，但 LAMMPS 读取 `BCD-MDI.pre` 时失败。经过排查，存在以下三个核心问题。
-
----
-
-## 问题 1：Labelmap 缺失导致 LAMMPS 无法解析模板
-
-### 现象描述
-
-`BCD-MDI.pre` / `.post` 模板文件中使用了字符串类型标签（如 `OS-CG`、`CG-OS-CG`），但 `test/in.primary_core` 中没有对应的 `labelmap` 指令。运行后 LAMMPS 报错：
-
+**现有 data 文件**（`test/primary_core.data`，1.5MB）由 InterMol 转换 → 外部脚本清洗得来。实际运行 `test/in.primary_core` 时报错：
 ```
 ERROR: Invalid bond type OS-CG in Bonds section of molecule file
 ```
+根因：模板用字符串类型标签，但 LAMMPS 输入缺少 `labelmap`。
 
-### 根因分析
+**体系**：BCD（147原子，6种类型）×20 + MDI（29原子，7种类型）×100 → 5840原子，6080键，10340角，18720二面角，**0 improper**（已知缺陷）
 
-LAMMPS `molecule` 文件支持两种类型标识方式：
-1. **数字类型 ID**：直接引用 `data` 文件中的数值类型
-2. **字符串标签**：通过 `labelmap` 指令将字符串映射为数字类型 ID
+**两种 ITP 格式并存**：
 
-当前 `test/in.primary_core` 的 `molecule` 定义中没有 `labelmap` 指令，因此 LAMMPS 将模板文件中的字符串标签直接解析为数字，导致类型匹配失败。
+| 来源 | 键格式 | 角格式 | 二面角格式 |
+|------|--------|--------|-----------|
+| BCD (Q4MC-CD) | `ai aj funct c0(r0) c1(K)` | 同左格式 | functype=1: `phase K n` |
+| MDI / BCD-MDI (Sobtop) | `ai aj functype r0 K` | `a0 K`（显式列名） | functype=9 propers, functype=4 impropers |
 
-### 影响范围
+---
 
-- **阻塞 smoke test**：任何包含字符串标签的模板文件均无法被 LAMMPS 读取
-- **影响文件**：`test/in.primary_core` 中所有 `molecule` 定义（`BCD_Molecule`、`MDI_Molecule`、`BCD-MDI_Molecule`）
+## 核心决策：三种方案对比
 
-### 修复建议
+### 方案 A：修补 InterMol + 保留外部脚本
 
-在 `test/in.primary_core` 中每个 `molecule` 定义后添加 `labelmap` 指令，映射模板中的字符串标签到 `primary_core.data` 中的数字 type ID：
+修改 InterMol 的 `lammps_parser.py` 3 处（改 2 行 class 检查 + 取消 dead branch 注释），继续用清洗脚本组装多分子体系。
 
+- **优点**：改动量极小（~5 行）；ParmEd 自动单位换算；二面角转换已有成熟逻辑
+- **缺点**：依赖外部项目（InterMol v0.1.0.dev0，10 年未出正式版）；碎片化流程（InterMol→清洗→topo）；类型编号需手动对齐
+
+### 方案 B：完全自研，零外部依赖
+
+从头实现 ITP 解析、参数提取、单位换算、data 写入、多分子组装。
+
+- **优点**：完全掌控；类型编号天然统一；无版本兼容风险
+- **缺点**：约 300-400 行新代码；需自行实现所有转换公式；二面角转换可能踩坑
+
+### 方案 C：混合策略 — 借 InterMol 基础设施，自研输出层 ★推荐
+
+```
+┌─────────────────────────────────────────────────┐
+│ InterMol (借用)           自研 (新增)            │
+│ ┌──────────────┐    ┌──────────────────────┐    │
+│ │ ITP 解析      │───▶│ TypeRegistry         │    │
+│ │ (unit 系统)   │    │ 类型去重 & 编号映射    │    │
+│ │              │    └──────┬───────────────┘    │
+│ │ 参数提取      │         │                     │
+│ │ (force kwds) │         ▼                     │
+│ │              │    ┌──────────────────────┐    │
+│ │ 单位换算      │    │ write_data.py        │    │
+│ │ (ParmEd)     │───▶│ Data 文件各 section   │    │
+│ │              │    │ (含 Impropers ✅)     │    │
+│ └──────────────┘    └──────┬───────────────┘    │
+│                            │                     │
+│ topo.py (已有)             ▼                     │
+│ ┌──────────────┐    ┌──────────────────────┐    │
+│ │ parse_itp    │    │ build_system.py       │    │
+│ │ parse_gro    │───▶│ 多分子坐标 & 拓扑组装  │    │
+│ │ BFS 拓扑查询  │    └──────┬───────────────┘    │
+│ │ gen_templates│          │                     │
+│ │ write_map    │          ▼                     │
+│ └──────────────┘    ┌──────────────────────┐    │
+│                      │ write_in.py           │    │
+│                      │ LAMMPS 输入文件生成    │    │
+│                      └──────────────────────┘    │
+└─────────────────────────────────────────────────┘
+```
+
+**具体分工**：
+
+| 组件 | 来源 | 用途 |
+|------|------|------|
+| ITP 解析 | InterMol `gromacs_parser` | 解析 `[atoms]`, `[bonds]`, `[angles]`, `[dihedrals]` |
+| 参数 + unit | InterMol `forcedata` | 参数名→列位置映射、ParmEd 单位对象 |
+| 单位换算 | ParmEd `units` | `value_in_unit(units.kilocalorie_per_mole)` 等 |
+| 二面角转换 | InterMol `convert_dihedrals` | RB→Trig 展开（如需 multi/harmonic 输出） |
+| TypeRegistry | **自研** | 去重、分配数字类型 ID |
+| Data 写入 | **自研** `write_data.py` | 正确区分 propers/impropers；按 LAMMPS 格式输出 |
+| 多分子组装 | **自研** `build_system.py` | atom/bond/angle/dihedral index 偏移；GRO 坐标平移 |
+| 模板生成 | `topo.py`（已有，微调） | 改用 TypeRegistry 数字类型 ID 输出 |
+| in 文件 | **自研** `write_in.py` | pair_coeff, bond/angle/dihedral style, molecule 定义 |
+
+**方案 C 优势**：
+- 单位换算、二面角数学不重造轮子——用 InterMol + ParmEd 经过上千个体系验证的路径
+- Improper bug 自然规避——我们只借 InterMol 的**解析和单位**，不借它的**写入**逻辑
+- 类型编号全程掌控——TypeRegistry 在 data 和模板间共享
+- 如果未来 InterMol 修了 bug 出新版，我们也可以切换回去
+
+**需要给 InterMol 打的补丁**（可先 monkey-patch，不必改源码）：
+- `gromacs_parser.py:181` 把 `'4': ProperPeriodicDihedral` 改为 `'4': ImproperHarmonicDihedral`——或者我们自己写 wrapper，在解析后把 functype=4 的条目从 dihedrals 分离出来
+
+### 二面角简化策略
+
+InterMol 将 GROMACS proper periodic 转换为 `multi/harmonic`（A1-A5 系数）或 `charmm`（K n d weight），取决于 phase 是否为 0/180。`test/primary_core.data` 中 30 种二面角类型中有 28 种是 multi/harmonic，仅 2 种是 charmm。
+
+自研时可**统一使用 `dihedral_style fourier`**（GAFF 原生风格）：
+- 每条 GROMACS proper periodic 项 → 一个 fourier 二面角类型
+- `fourier` 风格是 LAMMPS 中对 GAFF 力场的标准选择，支持任意 phase 值
+- 格式：`ID fourier K n d`（K: kcal/mol, n: integer, d: degrees）
+- 同一四元组上多条不同 n 的项 → 多条 fourier 条目叠加（LAMMPS 自动求和）
+- 转换：`K_lmp = K_gro / 4.184`，n 和 d 不变
+- 避免了 RB→multi/harmonic 的 Chebyshev 多项式展开
+
+### InterMol 源码级分析
+
+InterMol 的转换管道是：GROMACS ITP → `ProperPeriodicDihedral` → `TrigDihedral`（8系数规范形式）→ `charmm`/`multi/harmonic`。
+
+**Improper bug 精确追踪**：
+
+| 位置 | 代码 | 问题 |
+|------|------|------|
+| `gromacs_parser.py:997` | `improper = numeric_dihedraltype in ['2','4']` | functype=4 正确检测为 improper ✓ |
+| `gromacs_parser.py:181` | `'4': ProperPeriodicDihedral` | 映射为 ProperPeriodicDihedral（非 ImproperHarmonicDihedral） |
+| `gromacs_parser.py:1007-1010` | `['1','3','4','5','9']` → `TrigDihedral` | functype=4 成为 TrigDihedral，improper 标志保留在 `.improper` 属性 |
+| `lammps_parser.py:192` | `if False: #dihedral.improper` | **dead branch** — 预留的修复路径从未启用 |
+| `lammps_parser.py:952-953` | `force.__class__ != ImproperHarmonicDihedral` → Dihedrals | TrigDihedral ≠ ImproperHarmonicDihedral，==> improper 错入 Dihedrals |
+| `lammps_parser.py:962-963` | `force.__class__ == ImproperHarmonicDihedral` → Impropers | TrigDihedral ≠ ImproperHarmonicDihedral，improper 被排除 |
+
+**修复 InterMol 只需改 2 行**（`lammps_parser.py:952-953,962-963`）：
+```python
+# write_dihedrals: 从 class 判断改为 improper 属性判断
+dihedral_forces = {f for f in mol_type.dihedral_forces if not getattr(f, 'improper', False)}
+# write_impropers: 同上
+improper_forces = {f for f in mol_type.dihedral_forces if getattr(f, 'improper', False)}
+```
+同时取消 `lammps_parser.py:192` 的 dead branch 注释，使 functype=4 improper 走正确的写入路径。
+
+**1/2 缩放因子**（`lammps_parser.py:58-59`）：
+- `SCALE_INTO = 2.0`，`SCALE_FROM = 0.5`
+- 仅用于 harmonic bond/angle/improper 的 `k` 参数（`canonical_bond:92-93`, `canonical_angle:126-127`, `canonical_dihedral:210`）
+- 二面角 K / LJ ε 不经过此缩放
+
+**GROMACS ↔ LAMMPS 符号约定差异**（`gromacs_parser.py:236-238`）：
+- GROMACS RB 二面角转换时对 C1/C3/C5 取反（psi → phi 符号约定），LAMMPS 侧不做此处理
+- 这仅影响 RB（functype=3）二面角，GAFF 使用 functype=1/9/4 不受影响
+
+---
+
+## 问题 1：Labelmap 缺失 → 模板类型标签无法解析 [P0]
+
+**现象**：`BCD-MDI.pre` 用字符串类型标签（`OS-CG` 等），`test/in.primary_core` 无 `labelmap`，LAMMPS 报错。
+
+**根因**：LAMMPS molecule 模板的 Types/Bonds/Angles 等 section 可使用字符串标签或数字 ID。字符串标签必须通过 `labelmap`（在 `molecule` 命令或 data 文件的 Type Labels section 中定义）映射到数字 ID。
+
+**短期修复**：在 `molecule` 命令添加 labelmap：
 ```lammps
-labelmap bond OS-CG 7      # 对应 primary_core.data 中的 Bond Coeffs 索引
-labelmap angle CG-OS-CG 11 # 对应 primary_core.data 中的 Angle Coeffs 索引
-# ... 补充所有在模板中使用的 bond/angle/dihedral/improper 类型标签
+molecule pre_bcd_mdi ../BCD-MDI.pre
+  labelmap bond OS-CG 1 CG-OS 2 CG-CG 3 ...
+  labelmap angle OS-CG-CG 1 ...
 ```
+**长期方案**：自研生成器中模板直接输出数字类型 ID，彻底消除 labelmap 需求。通过 `TypeRegistry` 统一 data 和模板的类型编号。
 
 ---
 
-## 问题 2：InterMol 将 Impropers 错误归类到 Dihedrals 中
+## 问题 2：Improper 二面角缺失 [P1]
 
-### 现象描述
+**现象**：`test/primary_core.data` 显示 `0 impropers`，但 MDI.itp 的 `[ dihedrals ] ; impropers` 包含 12 条 functype=4 improper。
 
-`primary_core.data` 中显示 `0 impropers / 18720 dihedrals`，但原始 GROMACS 拓扑 `MDI.itp` 中 `[ dihedrals ] ; impropers` 实际包含 12 条 functype=4 的 improper。这些 improper 被错误地写入了 Dihedrals section。
+**根因**：
+- InterMol bug：functype=4 被标记 `improper=True` 但映射为 `ProperPeriodicDihedral → TrigDihedral` 类，写入 LAMMPS 时只有 `ImproperHarmonicDihedral` 类才进入 Impropers section
+- 上游清洗脚本额外硬编码 `n_impropers = 0`
 
-### 根因分析
-
-**InterMol GROMACS Parser** (`gromacs_parser.py:997-1018`)：
-- functype=4 的 dihedrals 被标记了 `improper=True`
-- 但在 `['1','3','4','5','9']` 分支中被映射为 `TrigDihedral` 类，而非 `ImproperHarmonicDihedral` 类
-
-**LAMMPS Writer** (`lammps_parser.py:950-965`)：
-- `write_dihedrals()` 排除 `ImproperHarmonicDihedral` 类 → `TrigDihedral` 类的 impropers 被包含进 Dihedrals
-- `write_impropers()` 只选择 `ImproperHarmonicDihedral` 类 → `TrigDihedral` 类的 impropers 被排除
-
-**结果**：functype=4 的 impropers 被写入了 Dihedrals section，导致 `Impropers` 和 `Improper Coeffs` 均为 0。
-
-### 影响范围
-
-- **分子拓扑不完整**：MDI 残基中的 improper 约束丢失
-- **下游脚本链断裂**：即使手动修正 data 文件，上游脚本（见问题 3）也会将其丢弃
-- **模板生成**：当前 `topo.py` 已能生成含 `Impropers` section 的模板，但无法与 `0 impropers` 的 data 文件匹配
-
-### 修复建议
-
-**方案 A（推荐）：修改 InterMol 源码**
-
-在 LAMMPS output 时，根据 `force.improper` 标志位（而非 `__class__`）来分类 dihedral/improper：
-
-```python
-# lammps_parser.py:write_dihedrals()
-# 原逻辑：
-# if not isinstance(force, ImproperHarmonicDihedral):
-
-# 修复后：
-# if not force.improper:
-#     # 写入 Dihedrals
-
-# lammps_parser.py:write_impropers()
-# 原逻辑：
-# if isinstance(force, ImproperHarmonicDihedral):
-
-# 修复后：
-# if force.improper:
-#     # 写入 Impropers
-```
-
-**方案 B（绕过 InterMol）**
-
-在生成 LAMMPS data 文件后，编写后处理脚本：
-1. 扫描 Dihedrals section，识别 functype=4 的条目（impropers）
-2. 将其移动到 Impropers section
-3. 同步移动对应的 Improper Coeffs
-
-**方案 C（临时规避）**
-
-在 InterMol 修复前，让 `topo.py` 暂不输出 impropers，与当前 InterMol 产物保持一致。但这只是权宜之计， improper 的物理约束仍缺失。
+**自研方案修复**：解析时检测 `'improper' in section_header.lower()` → 直接归类为 improper；生成 data 时独立写入 Impropers 和 Improper Coeffs section。转换：`K_lammps = K_gro / 8.368`（LAMMPS harmonic improper 内嵌 1/2 因子，与 angle 同理）。
 
 ---
 
-## 问题 3：上游脚本硬编码 `0 impropers`
+## 问题 3：缺少完整的 data 文件生成器 [P0]
 
-### 现象描述
+**现状**：`topo.py` 只生成 pre/post/map 模板。data 文件由外部流水线生成，不在仓库内。
 
-在 `/home/bsha/md/crosslink/BCD-MDI/` 目录下，`clean_lammps_data.py` 和 `make_reaction_assets.py` 硬编码了 `0 impropers`。即使 InterMol 正确输出了 impropers，这些脚本也会将其丢弃。
+**目标**：新增 `write_data()` 模块，输入 box.top + 各 ITP + GRO → 输出完整 data 文件。需实现：
 
-### 根因分析
+1. **原子类型枚举**：从 box.top 的 `[atomtypes]` 合并去重各 ITP 的 atom types → 分配 1..N 编号
+2. **参数提取 & 单位转换**：从 ITP 各 section 提取 bond/angle/dihedral/improper 参数，应用转换公式
+3. **拓扑类型去重**：每种独特的 (原子类型组合, 参数) → 一个 bond/angle/dihedral/improper 类型 ID
+4. **多分子体系组装**：按 box.top 中 `[molecules]` 的计数，偏移 atom index、bond/angle/dihedral index
+5. **坐标生成**：从 GRO 读取单分子坐标，为每个分子实例平移（或使用预建的大 GRO）
+6. **格式化输出**：按 LAMMPS data 格式写入各 section
 
-这些脚本在生成/清理 LAMMPS data 文件时，直接写入：
+同时生成配套的 in 文件（或 in 文件模板），包含 pair_coeff、bond/angle/dihedral style 定义。
 
-```python
-# clean_lammps_data.py / make_reaction_assets.py（简化示意）
-f.write(f"{n_impropers} impropers\n")  # n_impropers 硬编码为 0
-```
+---
 
-没有读取或传递 InterMol 输出的 impropers 信息，也没有对应的 `Improper Coeffs` 和 `Impropers` section 写入逻辑。
+## 问题 4：模板与 data 类型编号一致性 [P0]
 
-### 影响范围
+**原子类型映射**（需在 data 和模板间共享）：
 
-- **数据文件不完整**：即使 InterMol 修正了 improper 分类，这些脚本仍会将其过滤掉
-- **模板与数据不匹配**：`BCD-MDI.pre/post` 中若包含 `Impropers`，则无法与 `0 impropers` 的 data 文件配合使用
-- **需要重新生成数据**：修复脚本后，必须重新运行整个数据处理流水线
+| ID | Name | Mass | σ (Å) | ε (kcal/mol) | 来源 |
+|----|------|------|-------|-------------|------|
+| 1 | CG | 12.010 | 3.3996695 | 0.1094000 | BCD |
+| 2 | H2 | 1.008 | 2.2931733 | 0.0157000 | BCD |
+| 3 | OS | 16.000 | 3.0000123 | 0.1700000 | BCD |
+| 4 | H1 | 1.008 | 2.4713530 | 0.0157000 | BCD |
+| 5 | OH | 16.000 | 3.0664734 | 0.2104000 | BCD |
+| 6 | HO | 1.008 | 0.0000000 | 0.0000000 | BCD |
+| 7 | c3 | 12.011 | 3.3996700 | 0.1094000 | MDI |
+| 8 | hc | 1.008 | 2.6495330 | 0.0157000 | MDI |
+| 9 | ca | 12.011 | 3.3996700 | 0.0860000 | MDI |
+| 10 | ha | 1.008 | 2.5996420 | 0.0150000 | MDI |
+| 11 | ne | 14.007 | 3.2499990 | 0.1700000 | MDI |
+| 12 | c1 | 12.011 | 3.3996700 | 0.2100000 | MDI |
+| 13 | o | 15.999 | 2.9599220 | 0.2100000 | MDI |
+| 14 | hn | 1.008 | 1.0690780 | 0.0157000 | post |
+| 15 | n | 14.007 | 3.2499990 | 0.1700000 | post |
+| 16 | c | 12.011 | 3.3996700 | 0.0860000 | post |
 
-### 修复建议
+（与 `test/in.primary_core` 中 `pair_coeff` 顺序一致。Post 类型 hn/n/c 仅在交联产物 BCD-MDI.itp 中出现。）
 
-1. **修改 `clean_lammps_data.py`**：从 InterMol 输出中读取 impropers 数量，保留 `Improper Coeffs` 和 `Impropers` section
-2. **修改 `make_reaction_assets.py`**：传递 `n_impropers` 参数，不再硬编码为 0
-3. **重新生成 `primary_core.data`**：修复后重新运行流水线，确保包含正确的 impropers
+**注意大小写去重**：BCD-MDI.itp 中同时有 `CG`（来自 BCD）和 `c3`（来自 MDI）、`OS` 和 `os`、`H1` 和 `h1` 等近似但参数不完全相同的类型对。去重策略：按 **name 大小写敏感** + **参数容差比较**，参数相同则共享类型 ID，不同则分配新 ID。
+
+**解法**：实现 `TypeRegistry` 类，data 生成和模板生成共享同一实例，保证 atom/bond/angle/dihedral/improper 类型 ID 完全一致。
+
+---
+
+## 附录：单位换算速查表（GROMACS → LAMMPS `real`）
+
+| 参数 | GROMACS 单位 | LAMMPS 单位 | 换算 |
+|------|-------------|------------|------|
+| 坐标 / 键长 r₀ / LJ σ | nm | Å | **×10** |
+| 键力常数 K | kJ/(mol·nm²) | kcal/(mol·Å²) | **÷ 836.8** ① |
+| 角力常数 K | kJ/(mol·rad²) | kcal/(mol·rad²) | **÷ 8.368** ① |
+| 角 θ₀ / χ₀ / 二面角相位 d | deg | deg | 不变 |
+| 二面角力常数 K | kJ/mol | kcal/mol | **÷ 4.184** |
+| 二面角多重度 n | — | — | 不变 |
+| LJ ε | kJ/mol | kcal/mol | **÷ 4.184** |
+| 电荷 / 质量 | e / amu | e / g/mol | 不变 |
+
+> ① **关键**：LAMMPS harmonic 风格能量公式为 `E = K(x-x₀)²`，已内嵌 1/2 因子；GROMACS 公式为 `V = ½K(r-r₀)²`。因此 LAMMPS K 需额外 ÷2。
+
+**转换推导示例**（键）：
+K_lmp = K_gro × (1/2) × (1/4.184) × (1/100) = K_gro / 836.8
+
+**验证**（来自 `test/primary_core.data`）：BCD bond `17-18`（CG-H1）：r₀=0.1092nm, K_gro=343088 → r₀_lmp=1.092Å ✓, K_lmp=343088/836.8=410.0 ✓
+
+### 二面角风格选择
+
+自研生成器建议统一使用 `dihedral_style charmm`：
+- data 文件 Dihedral Coeffs 格式：`ID charmm K n d weight`
+- 每条 GROMACS proper periodic（functype=1 或 9）→ 一条 charmm 项
+- 同一四元组上多条（不同 n）→ 多条 charmm 项，LAMMPS 自动叠加
+
+### GROMACS functype 对照
+
+| GROMACS | 含义 | LAMMPS style | 写入 section |
+|---------|------|-------------|-------------|
+| bond functype 1 | harmonic bond | `harmonic` | Bond Coeffs |
+| angle functype 1 | harmonic angle | `harmonic` | Angle Coeffs |
+| dihedral functype 1 / 9 | proper periodic | `charmm` | Dihedral Coeffs |
+| dihedral functype 4 | improper harmonic | `harmonic` | **Improper Coeffs** |
 
 ---
 
 ## 下一步行动计划
 
-| 优先级 | 任务 | 目标文件/位置 | 预期结果 |
-|--------|------|-------------|----------|
-| P0 | 在 `in.primary_core` 中添加 labelmap 指令 | `test/in.primary_core` | LAMMPS 能解析模板中的字符串标签 |
-| P1 | 修复 InterMol improper 分类逻辑 | `lammps_parser.py:950-965` | functype=4 条目正确归入 Impropers |
-| P1 | 修复上游脚本硬编码问题 | `clean_lammps_data.py`, `make_reaction_assets.py` | data 文件正确保留 impropers |
-| P2 | 重新生成 `primary_core.data` | `/home/bsha/md/crosslink/BCD-MDI/` | 包含 12 个 impropers 的完整数据文件 |
-| P2 | 验证 smoke test | `test/in.primary_core` | LAMMPS 成功读取模板并完成反应模拟 |
+| 优先级 | 任务 | 预计代码量 | 依赖 |
+|--------|------|----------|------|
+| **P0** | 实现 `write_data.py`：ITP参数提取 + 单位转换 + data 文件输出 | ~150 行 | 无 |
+| **P0** | 实现 `TypeRegistry`：原子/键/角/二面角类型全局注册与去重 | ~80 行 | 无 |
+| **P1** | 扩展 `topo.py`：模板改用 TypeRegistry 的数字类型 ID 输出 | ~30 行修改 | TypeRegistry |
+| **P1** | 多分子体系组装 + GRO 坐标读取与平移 | ~80 行 | data 生成器 |
+| **P1** | in 文件生成（pair_coeff, bond/angle/dihedral style, molecule 定义等） | ~60 行 | TypeRegistry |
+| **P2** | 在有 LAMMPS 的环境中验证：运行 `test/in.primary_core` | — | 以上全部 |
+| **P2** | 短期验证用：手动在 `test/in.primary_core` 加 labelmap，确认模板格式正确 | 手动 | 无 |
 
 ### 当前决策
 
-- **立即执行 P0**：添加 labelmap 指令，验证非 improper 类型（bond/angle/dihedral）的 labelmap 是否正确
-- **P1 方案选择**：优先尝试方案 A（修改 InterMol 源码），若改动较大则采用方案 B（后处理脚本）
-- **P1 同步修复**：上游脚本与 InterMol 修复同步进行，避免重复工作
+- **采用方案 C（混合策略）**：借 InterMol 解析 ITP + 单位换算，自研 data 写入和体系组装
+- InterMol 需小修补：将 functype=4 的 `ProperPeriodicDihedral` 映射改为正确路径（或事后从 dihedral_forces 中按 `.improper` 属性筛出）
+- 二面角统一用 `fourier` 风格（GAFF 原生 proper periodic 形式），避免 `multi/harmonic` 的 5 项级数展开
+- 键/角/improper 力常数注意 1/2 因子（÷836.8 / ÷8.368）
+- 先完成 data 生成 + TypeRegistry（P0），再做多分子组装（P1）
