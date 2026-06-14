@@ -125,6 +125,219 @@ def _int_or_none(tok):
         return None
 
 
+class TypeRegistry:
+    """Stable numeric type registry shared by future data/input/template writers.
+
+    Values are keyed in LAMMPS real units so the same registry can later emit
+    coeff sections directly. Names remain case-sensitive; bonded namespaces are
+    independent, so bond type 1 and angle type 1 are unrelated just as in a
+    LAMMPS data file.
+    """
+
+    def __init__(self, scale=1_000_000):
+        self.scale = scale
+        self.atom_scale = 100
+        self._keys = {name: {} for name in ('atom', 'bond', 'angle', 'dihedral', 'improper')}
+        self._records = {name: [] for name in self._keys}
+        self._atom_names = {}
+        self._atom_aliases = {}
+        self._atom_alias_ids = {}
+
+    def _q(self, value):
+        return int(round(float(value) * self.scale))
+
+    def _qtuple(self, values):
+        return tuple(self._q(v) for v in values)
+
+    def _qa(self, value):
+        return int(round(float(value) * self.atom_scale))
+
+    def _atom_bucket(self, atom_type):
+        return (
+            atom_type.atomic_number,
+            atom_type.ptype,
+            self._qa(atom_type.mass),
+            self._qa(atom_type.charge),
+            self._qa(atom_type.sigma * 10.0),
+            self._qa(atom_type.epsilon / 4.184),
+        )
+
+    def _register(self, kind, key, record):
+        keys = self._keys[kind]
+        if key in keys:
+            return keys[key]
+        type_id = len(keys) + 1
+        keys[key] = type_id
+        self._records[kind].append({'id': type_id, 'key': key, **record})
+        return type_id
+
+    def _lookup(self, kind, key):
+        return self._keys[kind][key]
+
+    def atom_key(self, name, atom_type=None):
+        if atom_type is None:
+            return ('name', name)
+        return ('atom', name, self._atom_bucket(atom_type))
+
+    def register_atom_type(self, name, atom_type=None, source=None):
+        key = self.atom_key(name, atom_type)
+        if key in self._keys['atom']:
+            return self._keys['atom'][key]
+        if key[0] == 'id':
+            self._atom_names[name] = key[1]
+            self._atom_aliases[name] = self._records['atom'][key[1] - 1]['name']
+            return key[1]
+        alias_id = self._atom_alias_ids.get(name)
+        if alias_id is not None:
+            return alias_id
+        if atom_type is None:
+            record = {'name': name, 'source': source}
+        else:
+            record = {
+                'name': atom_type.name,
+                'mass': atom_type.mass,
+                'charge': atom_type.charge,
+                'ptype': atom_type.ptype,
+                'sigma': atom_type.sigma * 10.0,
+                'epsilon': atom_type.epsilon / 4.184,
+                'source': source,
+            }
+        type_id = self._register('atom', key, record)
+        self._atom_names[name] = type_id
+        self._atom_aliases[name] = self._records['atom'][type_id - 1]['name']
+        return type_id
+
+    def add_atom_alias(self, alias, target):
+        type_id = self._atom_names[target]
+        self._atom_aliases[alias] = target
+        self._atom_alias_ids[alias] = type_id
+        return type_id
+
+    def atom_label(self, name):
+        return self._atom_aliases.get(name, name)
+
+    def atom_type_id(self, name, atom_type=None):
+        if name in self._atom_alias_ids:
+            return self._atom_alias_ids[name]
+        key = self.atom_key(name, atom_type)
+        if key[0] == 'id':
+            return key[1]
+        return self._lookup('atom', key)
+
+    def _entry_types(self, entry, atom_types):
+        return tuple(self.atom_label(atom_types[aid]) for aid in entry.atoms)
+
+    def bond_key(self, bond, atom_types):
+        ti, tj = self._entry_types(bond, atom_types)
+        pair = tuple(sorted((ti, tj)))
+        if len(bond.params) >= 2:
+            params = (bond.params[0] * 10.0, bond.params[1] / 836.8)
+        else:
+            params = bond.params
+        return (pair, bond.funct, self._qtuple(params))
+
+    def register_bond_type(self, bond, atom_types, source=None):
+        key = self.bond_key(bond, atom_types)
+        return self._register('bond', key, {
+            'types': key[0],
+            'funct': bond.funct,
+            'params': key[2],
+            'source': source,
+        })
+
+    def bond_type_id(self, bond, atom_types):
+        return self._lookup('bond', self.bond_key(bond, atom_types))
+
+    def angle_key(self, angle, atom_types):
+        ti, tj, tk = self._entry_types(angle, atom_types)
+        outer = tuple(sorted((ti, tk)))
+        if len(angle.params) >= 2:
+            params = (angle.params[0], angle.params[1] / 8.368)
+        else:
+            params = angle.params
+        return ((outer[0], tj, outer[1]), angle.funct, self._qtuple(params))
+
+    def register_angle_type(self, angle, atom_types, source=None):
+        key = self.angle_key(angle, atom_types)
+        return self._register('angle', key, {
+            'types': key[0],
+            'funct': angle.funct,
+            'params': key[2],
+            'source': source,
+        })
+
+    def angle_type_id(self, angle, atom_types):
+        return self._lookup('angle', self.angle_key(angle, atom_types))
+
+    def dihedral_key(self, dihedral, atom_types):
+        types = self._entry_types(dihedral, atom_types)
+        if len(dihedral.params) >= 3:
+            params = (dihedral.params[0], dihedral.params[1] / 4.184, int(round(dihedral.params[2])))
+        else:
+            params = dihedral.params
+        return (types, dihedral.funct, self._qtuple(params))
+
+    def register_dihedral_type(self, dihedral, atom_types, source=None):
+        key = self.dihedral_key(dihedral, atom_types)
+        return self._register('dihedral', key, {
+            'types': key[0],
+            'funct': dihedral.funct,
+            'params': key[2],
+            'source': source,
+        })
+
+    def dihedral_type_id(self, dihedral, atom_types):
+        return self._lookup('dihedral', self.dihedral_key(dihedral, atom_types))
+
+    def improper_key(self, improper, atom_types):
+        ti, tj, tk, tl = self._entry_types(improper, atom_types)
+        outers = tuple(sorted((ti, tj, tl)))
+        if len(improper.params) >= 3:
+            params = (improper.params[0], improper.params[1] / 8.368, int(round(improper.params[2])))
+        else:
+            params = improper.params
+        return ((outers[0], outers[1], tk, outers[2]), improper.funct, self._qtuple(params))
+
+    def register_improper_type(self, improper, atom_types, source=None):
+        key = self.improper_key(improper, atom_types)
+        return self._register('improper', key, {
+            'types': key[0],
+            'funct': improper.funct,
+            'params': key[2],
+            'source': source,
+        })
+
+    def improper_type_id(self, improper, atom_types):
+        return self._lookup('improper', self.improper_key(improper, atom_types))
+
+    def register_topology(self, topo, source=None):
+        src = source or topo.filepath.name
+        for name, atom_type in topo.atomtypes.items():
+            self.register_atom_type(name, atom_type, src)
+        atom_types = {aid: atom.type for aid, atom in topo.atoms.items()}
+        for atom in topo.atoms.values():
+            self.register_atom_type(atom.type, topo.atomtypes.get(atom.type), src)
+        for bond in topo.bonds:
+            self.register_bond_type(bond, atom_types, src)
+        for angle in topo.angles:
+            self.register_angle_type(angle, atom_types, src)
+        for proper in topo.propers:
+            self.register_dihedral_type(proper, atom_types, src)
+        for improper in topo.impropers:
+            self.register_improper_type(improper, atom_types, src)
+        return self
+
+    def counts(self):
+        return {kind: len(records) for kind, records in self._records.items()}
+
+    def records(self, kind):
+        return tuple(self._records[kind])
+
+    def summary_lines(self):
+        counts = self.counts()
+        return [f"{kind}: {counts[kind]}" for kind in ('atom', 'bond', 'angle', 'dihedral', 'improper')]
+
+
 def parse_itp_rich(filepath):
     """Parse a GROMACS ITP file and preserve force-field parameters.
 
@@ -557,7 +770,29 @@ def main():
     p.add_argument('-dihedral', action='store_true')
     p.add_argument('-within', type=int, nargs='?', const=None, default=-1,
                    help='Bond-distance cutoff; with multi-mol, uses combined topology')
+    p.add_argument('--debug-types', action='store_true',
+                   help='Parse rich topology records and print TypeRegistry counts')
     args = p.parse_args()
+
+    if args.debug_types:
+        registry = TypeRegistry()
+        top_path = Path('box.top')
+        if top_path.exists():
+            top = parse_top(top_path)
+            for name, atom_type in top.atomtypes.items():
+                registry.register_atom_type(name, atom_type, top_path.name)
+        for mol in [m.strip() for m in args.mol.split(',')]:
+            fp = Path(f"{mol}.itp")
+            if fp.exists():
+                registry.register_topology(parse_itp_rich(fp))
+        combined = '-'.join(m.strip() for m in args.mol.split(','))
+        cfp = Path(f"{combined}.itp")
+        if cfp.exists():
+            registry.register_topology(parse_itp_rich(cfp))
+        print("TypeRegistry counts:")
+        for line in registry.summary_lines():
+            print(f"  {line}")
+        return
 
     mols = [m.strip() for m in args.mol.split(',')]
     atom_list = [int(x.strip()) for x in args.atom.split(',')]

@@ -208,9 +208,15 @@ molecule pre_bcd_mdi ../BCD-MDI.pre
 
 （与 `test/in.primary_core` 中 `pair_coeff` 顺序一致。Post 类型 hn/n/c 仅在交联产物 BCD-MDI.itp 中出现。）
 
-**注意大小写去重**：BCD-MDI.itp 中同时有 `CG`（来自 BCD）和 `c3`（来自 MDI）、`OS` 和 `os`、`H1` 和 `h1` 等近似但参数不完全相同的类型对。去重策略：按 **name 大小写敏感** + **参数容差比较**，参数相同则共享类型 ID，不同则分配新 ID。
+**注意大小写去重**：BCD-MDI.itp 中同时有 `CG`（来自 BCD）和 `c3`（来自 MDI）、`OS` 和 `os`、`H1` 和 `h1` 等近似类型。去重策略：**atom type 名称大小写敏感**，因此 `OS` 与 `os`、`H1` 与 `h1` 必须分开处理；仅当 **名称完全相同且参数在容差内一致** 时才复用类型 ID。
 
-**解法**：实现 `TypeRegistry` 类，data 生成和模板生成共享同一实例，保证 atom/bond/angle/dihedral/improper 类型 ID 完全一致。
+**当前进展**：`TypeRegistry` 第一版已在 `topo.py` 中实现，用于为 atom/bond/angle/dihedral/improper 分配稳定数字 ID。当前仅作为注册与 debug 层使用，尚未接入 `.pre/.post` 数字输出或 `box.data` writer。调试命令：
+```bash
+python topo.py -mol "BCD,MDI" -atom "146,28" --debug-types
+```
+当前统计：`atom=21, bond=19, angle=30, dihedral=71, improper=6`。
+
+**解法**：后续 data 生成和模板生成共享同一 `TypeRegistry` 实例，保证 atom/bond/angle/dihedral/improper 类型 ID 完全一致。
 
 ---
 
@@ -256,8 +262,8 @@ K_lmp = K_gro × (1/2) × (1/4.184) × (1/100) = K_gro / 836.8
 
 | 优先级 | 任务 | 预计代码量 | 依赖 |
 |--------|------|----------|------|
-| **P0** | 实现 `write_data.py`：ITP参数提取 + 单位转换 + data 文件输出 | ~150 行 | 无 |
-| **P0** | 实现 `TypeRegistry`：原子/键/角/二面角类型全局注册与去重 | ~80 行 | 无 |
+| **P0** | 实现 `write_data.py`：ITP参数提取 + 单位转换 + data 文件输出 | ~150 行 | TypeRegistry |
+| **P0** | 实现 `TypeRegistry`：原子/键/角/二面角类型全局注册与去重 | 已完成第一版 | 无 |
 | **P1** | 扩展 `topo.py`：模板改用 TypeRegistry 的数字类型 ID 输出 | ~30 行修改 | TypeRegistry |
 | **P1** | 多分子体系组装 + GRO 坐标读取与平移 | ~80 行 | data 生成器 |
 | **P1** | in 文件生成（pair_coeff, bond/angle/dihedral style, molecule 定义等） | ~60 行 | TypeRegistry |
@@ -267,7 +273,10 @@ K_lmp = K_gro × (1/2) × (1/4.184) × (1/100) = K_gro / 836.8
 ### 当前决策
 
 - **采用方案 C（混合策略）**：借 InterMol 解析 ITP + 单位换算，自研 data 写入和体系组装
+- `parse_itp_rich()` / `parse_top()` 已完成第一版；`TypeRegistry` 已完成第一版，当前用于稳定类型注册和 debug 统计
+- Atom type 名称大小写敏感：`OS`/`os`、`H1`/`h1` 等分开处理，不跨大小写合并
+- `[ pairs ]` 暂不解析，先使用自动产生/`special_bonds` 路径
 - InterMol 需小修补：将 functype=4 的 `ProperPeriodicDihedral` 映射改为正确路径（或事后从 dihedral_forces 中按 `.improper` 属性筛出）
 - 二面角统一用 `fourier` 风格（GAFF 原生 proper periodic 形式），避免 `multi/harmonic` 的 5 项级数展开
 - 键/角/improper 力常数注意 1/2 因子（÷836.8 / ÷8.368）
-- 先完成 data 生成 + TypeRegistry（P0），再做多分子组装（P1）
+- 下一步优先：模板可选数字 ID 输出，随后实现 `box.data` writer
